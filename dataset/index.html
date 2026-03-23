@@ -1,0 +1,1283 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset='utf-8'>
+  <meta name='viewport' content='width=device-width, initial-scale=1, shrink-to-fit=no'>
+  <title>IT_DATASET Adattábla nézegető és szerkesztő</title>
+  <script src='https://cdn.jsdelivr.net/npm/chart.js@4.4.0'></script>
+  <script src='https://cdn.jsdelivr.net/npm/hammerjs@2.0.8'></script>
+  <script src='https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.2.0'></script>
+  <script src="https://unpkg.com/html5-qrcode"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
+  <link rel="stylesheet" href="styles.css">
+  <link rel='icon' type='image/png' href='favicon.ico'>
+</head>
+<body>
+  <h2>Adattábla nézegető</h2>
+  <div class='simple-box' id='scanBox'>
+    <button id="scanBtn">Vonalkód beolvasása</button>
+    <label><input type="checkbox" id="eanEnabled"> EAN</label>
+  <div id="reader" style="width:300px;"></div>
+  </div>
+  <div class="simple-box">
+    <label>XML kulcs:</label>
+    <input type="text" id="xmlKeyInput" value="Record" style="width:120px;">
+  </div>
+	  <div class='simple-box no-web' id='openAndSave'>
+    <label>Kódolás:</label>
+    <select id="encodingSelect">
+      <option value="utf-8" selected>UTF-8</option>
+      <option value="windows-1250">Windows-1250 (Közép-Európa)</option>
+      <option value="iso-8859-2">ISO-8859-2 (Latin-2)</option>
+    </select>
+    <label>Határoló:</label>
+    <input type="text" id="delimiterInput" value=";" maxlength="1" style="width:30px; text-align:center;">
+    <input type='file' id='dataFile' accept='.csv, .json, .xml'>
+    <button id="saveCsvBtn">CSV Mentés</button>
+	<button id="saveJsonBtn">JSON mentés</button>
+  </div>
+  <div class='simple-box' id='firstFilter'>
+    <span id="rowCount" style="margin-left:20px; font-weight:bold;"></span>
+	<select id="fieldSelect"></select>
+    <label for='filterValue'>Szűrés...</label>
+    <input type='text' id='filterValue' placeholder='Érték' />
+    <label><input type="checkbox" id="sortDesc"> Csökk.</label>
+  </div>
+  <div class='simple-box no-web' id='secondFilter'>
+    <label>
+      <input type='checkbox' id='includeText' checked>
+      Tartalmazza / Nem tartalmazza
+    </label>
+    <label>
+      <input type="radio" name="combineMode" value="and" checked> ÉS
+    </label>
+    <label>
+      <input type="radio" name="combineMode" value="or"> VAGY
+    </label>
+    <select id="fieldSelect2"></select>
+    <input type='text' id='filterValue2' placeholder='Érték' />
+  </div>
+  <div class='simple-box no-web' id='operationBox'> 
+    <button onclick="addRow()">Új sor</button>
+    <button class="danger-btn" onclick="deleteRow()">Sor törlése</button>
+    <button onclick="addColumn()">Új oszlop</button>
+    <button class="danger-btn" onclick="deleteColumn()">Oszlop törlése</button>
+  </div>
+  <div class='simple-box' id='printBox'> 
+    <button onclick="dataPrint()">Nyomtatás</button>
+  </div>
+  <div id="eanTable"></div>
+  <div id="dataTable"></div>
+  <div class='footer-box' id='footerBox' style='background-color: #505050;'>
+    <p>© 2026 IT_DATASET v.1.1</p>
+  </div>
+<div id="printArea" style="width:300px; margin-top: 24px; font-family: Arial, sans-serif;">
+  <div id="printLabel" style="text-align:center; font-size:16px; margin-bottom:4px;"></div>
+  <div style="text-align:center;">
+    <svg id="printBarcode"></svg>
+  </div>
+</div>
+
+<script>
+let scanner;
+let fieldDefinitions = { extraInfo: [] };
+let headers = [];
+let rows = [];
+let selectedRowIndex = null;
+let selectedColIndex = null;
+let currentEdit = null;
+let defaultPrefix = null;
+let filtered = [];
+const rowHeight = 27;    
+const visibleRows = 20; 
+
+function resetAll() {
+  headers = [];
+  rows = [];
+  filtered = [];
+  fieldDefinitions = { extraInfo: [] };
+  selectedRowIndex = null;
+  selectedColIndex = null;
+  currentEdit = null;
+  const tableBody = document.getElementById("tableBody");
+  if (tableBody) tableBody.innerHTML = "";
+  const tableHeader = document.getElementById("tableHeader");
+  if (tableHeader) tableHeader.innerHTML = "";
+  const saveBtn = document.getElementById("saveCsvBtn");
+  if (saveBtn) saveBtn.textContent = "CSV Mentés";
+  const saveJsonBtn = document.getElementById("saveJsonBtn");
+  if (saveJsonBtn) saveJsonBtn.textContent = "JSON mentés";
+}
+
+function createEmptyTable() {
+  resetAll();
+  headers = ["Azonosító"];
+  fieldDefinitions = { extraInfo: [] };
+  rows = [];
+  drawVirtualTable();
+}
+
+function loadBaseCsv() {
+// pl. max 768px szélesség → mobil
+  if (!window.matchMedia("(max-width: 768px)").matches) {
+    console.log("Nem mobil nézet, base.csv nem töltődik be");
+    return;
+  }
+  fetch("base.csv")
+    .then(resp => {
+      if (!resp.ok) throw new Error("base.csv nem található");
+      return resp.arrayBuffer();
+    })
+    .then(buffer => {
+      const view = new Uint8Array(buffer);
+      let encoding = "utf-8";
+      if (view[0] === 0xEF && view[1] === 0xBB && view[2] === 0xBF) {
+        encoding = "utf-8"; // BOM → biztosan UTF-8
+      }
+      const decoder = new TextDecoder(encoding);
+      let text = decoder.decode(buffer);
+      if (text.charCodeAt(0) === 0xFEFF) {
+        text = text.slice(1);
+      }
+      headers = [];
+      rows = [];
+      fieldDefinitions = {};
+      dataRegistry = {};
+      const delimiter = document.getElementById('delimiterInput')?.value || ",";
+      const lines = text.split(/\r?\n/).filter(l => l.trim() !== "");
+      headers = lines[0].split(delimiter);
+      rows = lines.slice(1).map(line => line.split(delimiter));
+	  fieldDefinitions = {
+        extraInfo: headers.map((h, idx) => ({
+          id: idx + 1,
+          name: h.replace(/\s+/g, "_"),
+          label: h,
+          type: "string"
+        }))
+      };
+	  rows = rows.map((r, idx) => {
+        const id = "ID-" + String(idx + 1).padStart(6, "0");
+        return [id, ...r];
+      });
+      headers = ["ID", ...headers];
+      fieldDefinitions = {
+        extraInfo: headers.slice(1).map((h, idx) => ({
+          id: idx + 1,
+          name: h.replace(/\s+/g, "_"),
+          label: h,
+          type: "string"
+        }))
+      };
+      console.log("base.csv betöltve induláskor");
+      buildFieldSelect();
+      drawVirtualTable();
+    })
+    .catch(err => {
+      console.warn("base.csv betöltése sikertelen:", err);
+    });
+}
+
+function loadXmlAsTable(file) {
+    const reader = new FileReader();
+
+    reader.onload = e => {
+        const text = e.target.result;
+
+        const parser = new DOMParser();
+        const xml = parser.parseFromString(text, "text/xml");
+
+        // 🔑 kulcs beolvasása
+        const key = document.getElementById("xmlKeyInput").value.trim() || "Record";
+
+        // rekordok keresése
+        const records = xml.getElementsByTagName(key);
+        if (!records.length) {
+            alert("Nem található <" + key + "> elem az XML-ben.");
+            return;
+        }
+
+        // 1) mezőnevek az első Record alapján
+        const first = records[0].children;
+        headers = ["ID", ...Array.from(first).map(n => n.tagName)];
+
+        // 2) sorok összeállítása
+        rows = [];
+        Array.from(records).forEach((rec, idx) => {
+            const row = ["ID-" + String(idx + 1).padStart(6, "0")];
+
+            Array.from(first).forEach(f => {
+                const node = rec.getElementsByTagName(f.tagName)[0];
+                let val = node ? node.textContent.trim() : "";
+                val = val.replace(/&#39;/g, "'");   // aposztróf javítás
+                row.push(val);
+            });
+
+            rows.push(row);
+        });
+
+        // 3) meződefiníciók (egyszerű text mezők)
+        fieldDefinitions = {
+            extraInfo: headers.slice(1).map((h, i) => ({
+                id: i + 1,
+                name: h.replace(/\s+/g, "_"),
+                label: h,
+                type: "string"
+            }))
+        };
+
+        buildFieldSelect();
+        drawVirtualTable();
+    };
+
+    reader.readAsText(file, "utf-8");
+}
+
+document.getElementById("scanBtn").addEventListener("click", () => {
+  const readerDiv = document.getElementById("reader");
+  const container = document.getElementById("eanTable");
+  const eanEnabled = document.getElementById('eanEnabled').checked;
+  readerDiv.style.display = "block";
+  //if (eanEnabled) searchBarcode("7630049201545");
+  scanner = new Html5Qrcode("reader");
+  scanner.start(
+    { facingMode: "environment" },
+    { fps: 10, qrbox: 250 },
+    decodedText => {
+      const input = document.getElementById("filterValue");
+	  //if (eanEnabled) openApiResult(decodedText);
+	  if (eanEnabled) searchBarcode(decodedText);
+      input.value = decodedText;
+      drawVirtualTable();
+      scanner.stop().then(() => {
+        readerDiv.style.display = "none";
+      });
+    },
+    errorMessage => {
+      console.warn("Hiba:", errorMessage);
+    }
+  ).then(() => {
+    scanner.pause();
+  });
+
+  readerDiv.addEventListener("click", () => {
+    scanner.resume();
+  });
+});
+
+document.getElementById('dataFile').addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  resetAll();
+  const name = file.name.toLowerCase();
+  if (name.endsWith(".json")) {
+    const reader = new FileReader();
+    reader.onload = evt => {
+      const fullJson = JSON.parse(evt.target.result);
+      loadJsonIntoTable(fullJson);   // <-- JSON → táblázat adapter
+    };
+    reader.readAsText(file);
+    return; // fontos: ne fusson tovább a CSV ág
+  }
+  
+  if (name.endsWith(".xml") || name.endsWith(".afx")) {
+    loadXmlAsTable(file);
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.onload = evt => {
+    const buffer = evt.target.result;
+    const view = new Uint8Array(buffer);
+    let encoding = document.getElementById('encodingSelect').value || "utf-8";
+    if (view[0] === 0xEF && view[1] === 0xBB && view[2] === 0xBF) {
+      encoding = "utf-8";
+    }
+    const decoder = new TextDecoder(encoding);
+    let text = decoder.decode(buffer);
+    if (text.charCodeAt(0) === 0xFEFF) {
+      text = text.slice(1);
+    }
+    const delimiter = document.getElementById('delimiterInput').value || ",";
+    const lines = text.split(/\r?\n/).filter(l => l.trim() !== "");
+    headers = lines[0].split(delimiter);
+    rows = lines.slice(1).map(line => line.split(delimiter));
+    fieldDefinitions = {
+      extraInfo: headers.map((h, idx) => ({
+        id: idx + 1,
+        name: h.replace(/\s+/g, "_"),
+        label: h,
+        type: "string"
+      }))
+    };
+	rows = rows.map((r, idx) => {
+      const id = "ID-" + String(idx + 1).padStart(6, "0");
+      return [id, ...r];
+    });
+    headers = ["ID", ...headers];
+    fieldDefinitions = {
+      extraInfo: headers.slice(1).map((h, idx) => ({
+        id: idx + 1,
+        name: h.replace(/\s+/g, "_"),
+        label: h,
+        type: "string"
+      }))
+    };
+    buildFieldSelect();
+    drawVirtualTable();
+  };
+  reader.readAsArrayBuffer(file);
+});
+
+function loadJsonIntoTable(fullJson) {
+  fieldDefinitions = fullJson.fieldDefinitions;
+  const defs = fullJson.fieldDefinitions.extraInfo;
+  headers = ["Azonosító", ...defs.map(fd => fd.label)];
+  rows = Object.entries(fullJson.dataRegistry).map(([id, entry]) => {
+    const row = [id];
+    defs.forEach(fd => {
+      const valObj = entry.values.find(v => v.id === fd.id);
+      let val = valObj ? valObj.value : "";
+      if (fd.type === "list") {
+        val = JSON.stringify(val || []);
+      }
+      if (fd.type === "memo") {
+        val = val || "";
+      }
+      row.push(val);
+    });
+    return row;
+  });
+  buildFieldSelect();
+  drawVirtualTable();
+}
+
+function buildFieldSelect() {
+  const select = document.getElementById('fieldSelect');
+  const select2 = document.getElementById('fieldSelect2');
+  select.innerHTML = '';
+  select2.innerHTML = '';
+  const optAll = document.createElement('option');
+  const optAll2 = document.createElement('option');
+  optAll.value = 'all';
+  optAll2.value = 'all';
+  optAll.textContent = 'Összes mező';
+  optAll2.textContent = 'Összes mező';
+  select.appendChild(optAll);
+  select2.appendChild(optAll2);
+  headers.forEach((h, idx) => {
+    const opt = document.createElement('option');
+    const opt2 = document.createElement('option');
+    opt.value = idx;
+    opt2.value = idx;
+    opt.textContent = h;
+    opt2.textContent = h;
+    select.appendChild(opt);
+    select2.appendChild(opt2);
+  });
+}
+
+function drawVirtualTable() {
+  const container = document.getElementById('dataTable');
+  container.innerHTML = '';
+  const textInclude = document.getElementById('includeText').checked;
+  const filterText = document.getElementById('filterValue').value.toLowerCase();
+  const fieldName = document.getElementById('fieldSelect').value;
+  const sortDesc = document.getElementById('sortDesc').checked;
+  let filtered = filterAndSortTable();  
+  const totalHeight = filtered.length * rowHeight;
+  const viewport = document.createElement('div');
+  viewport.style.height = (visibleRows * rowHeight) + 'px';
+  viewport.style.overflowY = 'scroll';
+  viewport.style.position = 'relative';
+  const spacer = document.createElement('div');
+  spacer.style.height = totalHeight + 'px';
+  viewport.appendChild(spacer);
+  const table = document.createElement('table');
+  table.style.position = 'absolute';
+  table.style.top = '0';
+  table.style.left = '0';
+  table.style.right = '0';
+  table.style.borderCollapse = 'collapse';
+  table.style.width = '100%';
+  const thead = document.createElement('thead');
+  const headRow = buildHeaderRow();   // itt épül fel a kijelölhető fejléc
+  thead.appendChild(headRow);
+  
+  // Oszlopösszegek hozzáadása a fejléc alá
+  const sumRow = buildSumRow(filtered);
+  if (sumRow) {
+    thead.appendChild(sumRow);
+  }
+  
+  table.appendChild(thead);
+  const tbody = document.createElement('tbody');
+  table.appendChild(tbody);
+
+function renderRows(startIndex) {
+  tbody.innerHTML = '';
+  const endIndex = Math.min(startIndex + visibleRows, filtered.length);
+  for (let i = startIndex; i < endIndex; i++) {
+    const obj = filtered[i];
+    const tr = document.createElement('tr');
+    tr.onclick = () => {
+      // előző kijelölés törlése
+      tbody.querySelectorAll("tr").forEach(r => r.classList.remove("selected"));
+      tr.classList.add("selected");
+      selectedRowIndex = obj.index; // eredeti rows index
+    };
+    // ha ez a sor volt kijelölve, állítsuk vissza
+    if (obj.index === selectedRowIndex) {
+      tr.classList.add("selected");
+    }
+    obj.row.forEach((val, ci) => {
+      const td = document.createElement('td');
+      td.dataset.row = obj.index;
+      td.dataset.col = ci;
+      
+      // Detektáljuk a mező típusát
+      const field = fieldDefinitions.extraInfo[ci - 1];
+      const fieldType = field?.type;
+      
+      // List típusú mező speciális kezelése
+      if (fieldType === 'list') {
+        let listItems = [];
+        try {
+          listItems = JSON.parse(val || '[]');
+        } catch (e) {
+          listItems = [];
+        }
+        
+        if (!Array.isArray(listItems)) {
+          listItems = [];
+        }
+        
+        const itemCount = listItems.length;
+        const summaryText = itemCount > 0 ? `📋 ${itemCount} elem` : '📋 Üres';
+        const listHtml = listItems
+          .map((item) => {
+            let display = item;
+            if (typeof item === 'object' && item.key && item.value) {
+              display = `<strong>${item.key}:</strong> ${item.value}`;
+            } else if (typeof item === 'object') {
+              display = JSON.stringify(item);
+            }
+            return `<li>${display}</li>`;
+          })
+          .join('');
+        
+        td.innerHTML = `
+          <details class="list-details">
+            <summary>${summaryText}</summary>
+            <ul>
+              ${listHtml}
+            </ul>
+          </details>
+        `;
+        td.title = `${itemCount} elem a listában`;
+      } else {
+        td.textContent = val;
+        td.title = val;
+      }
+      
+	  let lastTap = 0;
+	  td.addEventListener("touchend", e => {
+	  const now = Date.now();
+	  if (now - lastTap < 300) {
+        const field = fieldDefinitions.extraInfo[ci - 1];
+	    const type = field?.type;
+		openEditor(obj.index, ci, type);
+	  }
+	  lastTap = now;
+	});
+	  
+      td.oncontextmenu = (e) => {
+        e.preventDefault();
+        const field = fieldDefinitions.extraInfo[ci - 1];
+		const type = field?.type;
+		openEditor(obj.index, ci, type);
+      };
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  }
+  table.style.top = (startIndex * rowHeight) + 'px';
+}
+
+  viewport.addEventListener('scroll', () => {
+    const startIndex = Math.floor(viewport.scrollTop / rowHeight);
+    renderRows(startIndex);
+  });
+  renderRows(0);
+  viewport.appendChild(table);
+  
+  container.appendChild(viewport);
+  scrollToSelectedColumn(table, viewport);
+}
+
+function buildHeaderRow() {
+  const headRow = document.createElement('tr');
+  headers.forEach((h, idx) => {
+    const th = document.createElement('th');
+    th.textContent = h;
+    if (selectedColIndex === idx) {
+      th.style.background = "#0000ff";
+    }
+    th.onclick = () => {
+      // előző kijelölés törlése
+      document.querySelectorAll("th").forEach(el => el.style.background = "");
+      th.style.background = "#0000ff";
+      selectedColIndex = idx;
+      document.getElementById("fieldSelect").value = idx.toString();
+      drawVirtualTable();
+    };
+    headRow.appendChild(th);
+  });
+  return headRow;
+}
+
+document.getElementById("fieldSelect").addEventListener("change", e => {
+  const idx = parseInt(e.target.value, 10);
+  if (!isNaN(idx)) {
+    selectedColIndex = idx;
+  } else {
+    selectedColIndex = null;
+  }
+  drawVirtualTable(); // újrarajzolás → buildHeaderRow visszaállítja a kiemelést
+});
+
+document.getElementById("fieldSelect2").addEventListener("change", e => {
+  const idx = parseInt(e.target.value, 10);
+  if (!isNaN(idx)) {
+    selectedColIndex = idx;
+  } else {
+    selectedColIndex = null;
+  }
+  drawVirtualTable(); // újrarajzolás → buildHeaderRow visszaállítja a kiemelést
+});
+
+ function filterAndSortTable() {
+  const textInclude = document.getElementById('includeText').checked;
+  const filterText = document.getElementById('filterValue').value.toLowerCase();
+  const filterText2 = document.getElementById('filterValue2').value.toLowerCase();
+  const fieldName = document.getElementById('fieldSelect').value;
+  const fieldName2 = document.getElementById('fieldSelect2').value;
+  const mode = document.querySelector('input[name="combineMode"]:checked').value;
+  const sortDesc = document.getElementById('sortDesc').checked;
+  let filtered = rows.map((r, i) => ({ row: r, index: i })).filter(obj => {
+    let match1 = false;
+    if (fieldName === 'all') {
+      match1 = obj.row.some(val => String(val).toLowerCase().includes(filterText));
+    } else {
+      const idx1 = parseInt(fieldName, 10);
+      if (!isNaN(idx1)) {
+        match1 = String(obj.row[idx1]).toLowerCase().includes(filterText);
+      }
+    }
+    let match2 = false;
+    if (fieldName2 === 'all') {
+      match2 = obj.row.some(val => String(val).toLowerCase().includes(filterText2));
+    } else {
+      const idx2 = parseInt(fieldName2, 10);
+      if (!isNaN(idx2)) {
+        match2 = String(obj.row[idx2]).toLowerCase().includes(filterText2);
+      }
+    }
+    let combined = mode === "and" ? (match1 && match2) : (match1 || match2);
+    return (textInclude && combined) || (!textInclude && !combined);
+  });
+  if (fieldName !== 'all' || fieldName2 != 'all') {
+    const idx = parseInt(fieldName, 10);
+    if (!isNaN(idx)) {
+      filtered.sort((a, b) => {
+        const valA = a.row[idx] || "";
+        const valB = b.row[idx] || "";
+        const numA = parseFloat(valA), numB = parseFloat(valB);
+        let cmp;
+        if (!isNaN(numA) && !isNaN(numB)) cmp = numA - numB;
+        else cmp = valA.localeCompare(valB);
+        return sortDesc ? -cmp : cmp;
+      });
+    }
+  }
+  document.getElementById('saveCsvBtn').textContent = filtered.length !== rows.length ? "CSV Mentés (Szűrt)" : "CSV Mentés";
+  document.getElementById('saveJsonBtn').textContent = filtered.length !== rows.length ? "JSON Mentés (Szűrt)" : "JSON Mentés";
+  document.getElementById('rowCount').textContent = filtered.length + " sor";
+  document.getElementById('saveCsvBtn').onclick = () => saveFilteredCSV(filtered);
+  document.getElementById("saveJsonBtn").addEventListener("click", () => {
+    const filtered = filterAndSortTable(); 
+    const source = filtered.map(f => f.row);
+    const jsonData = tableToJson(source);
+    const blob = new Blob([JSON.stringify(jsonData, null, 2)], {
+      type: "application/json"
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "dataset.json";
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+  return filtered;
+}
+ 
+function scrollToSelectedColumn(table, viewport) {
+  const fieldName = document.getElementById('fieldSelect').value;
+  if (fieldName === 'all') return;
+  const idx = parseInt(fieldName, 10);
+  if (isNaN(idx)) return;
+  const ths = table.querySelectorAll("thead th");
+  if (ths[idx]) {
+    const targetLeft = ths[idx].offsetLeft;
+    const targetRight = targetLeft + ths[idx].offsetWidth;
+    const viewLeft = viewport.scrollLeft;
+    const viewRight = viewLeft + viewport.clientWidth;
+    if (targetLeft >= viewLeft && targetRight <= viewRight) {
+      ths[idx].style.background = "#0000ff";
+      return;
+    }
+    let newScroll = viewLeft;
+    if (targetLeft < viewLeft) {
+      newScroll = targetLeft - 80;
+    } else if (targetRight > viewRight) {
+      newScroll = targetRight - viewport.clientWidth + 80;
+    }
+    viewport.scrollLeft = Math.max(0, newScroll);
+    ths[idx].style.background = "#0000ff";
+  }
+}
+
+function buildSumRow(filtered) {
+  if (!filtered || filtered.length === 0) return null;
+
+  // Rugalmas számparzoló, kezeli a "," és "." tizedesjelet, valamint ezerelválasztókat
+  function parseNumberFlexible(s) {
+    if (s === null || s === undefined) return NaN;
+    let str = String(s).trim();
+    if (str === '') return NaN;
+    // távolítsunk el szóközöket és nem szám/jel karaktereket (kivéve . , + -)
+    str = str.replace(/\s+/g, '');
+    str = str.replace(/[^0-9\.,\-+]/g, '');
+
+    const hasDot = str.indexOf('.') !== -1;
+    const hasComma = str.indexOf(',') !== -1;
+
+    if (hasDot && hasComma) {
+      // mindkettő jelen van: eldöntjük, melyik a tizedesjel a későbbi előfordulás alapján
+      if (str.lastIndexOf(',') > str.lastIndexOf('.')) {
+        // ',' tizedes, '.' ezerelválasztó
+        str = str.replace(/\./g, '').replace(',', '.');
+      } else {
+        // '.' tizedes, ',' ezerelválasztó
+        str = str.replace(/,/g, '');
+      }
+    } else if (hasComma && !hasDot) {
+      // csak vessző van: feltételezzük, hogy tizedesjel
+      str = str.replace(/,/g, '.');
+    } else {
+      // csak pont van, vagy nincs külön jel -> hagyjuk
+    }
+
+    const num = parseFloat(str);
+    return isFinite(num) ? num : NaN;
+  }
+
+  const sums = {};
+  let hasNumericColumn = false;
+
+  // 1) explicit típusok alapján
+  headers.forEach((h, idx) => {
+    if (idx === 0) return; // ID oszlop kihagyása
+    const fieldDef = fieldDefinitions.extraInfo[idx - 1];
+    const isNumeric = fieldDef && (fieldDef.type === 'number' || fieldDef.type === 'decimal');
+    if (isNumeric) {
+      hasNumericColumn = true;
+      sums[idx] = { sum: 0, count: 0, label: h, isNumeric: true };
+    }
+  });
+
+  // 2) ha nincs explicit, próbáljuk meg az értékek alapján detektálni
+  if (!hasNumericColumn) {
+    headers.forEach((h, idx) => {
+      if (idx === 0) return;
+      let convertibleCount = 0;
+      let nonEmptyCount = 0;
+      filtered.forEach(obj => {
+        const val = obj.row[idx];
+        if (val !== undefined && val !== null && String(val).trim() !== '') {
+          nonEmptyCount++;
+          const num = parseNumberFlexible(val);
+          if (!isNaN(num)) convertibleCount++;
+        }
+      });
+      if (nonEmptyCount > 0 && convertibleCount / nonEmptyCount >= 0.8) {
+        hasNumericColumn = true;
+        sums[idx] = { sum: 0, count: 0, label: h, isNumeric: true };
+      }
+    });
+  }
+
+  if (!hasNumericColumn) return null;
+
+  // 3) összegzés
+  Object.keys(sums).forEach(colIdx => {
+    filtered.forEach(obj => {
+      const val = obj.row[colIdx];
+      const num = parseNumberFlexible(val);
+      if (!isNaN(num)) {
+        sums[colIdx].sum += num;
+        sums[colIdx].count += 1;
+      }
+    });
+  });
+
+  // 4) sor létrehozása
+  const tr = document.createElement('tr');
+  tr.className = 'sum-row';
+  tr.style.backgroundColor = '#3a3a3a';
+  tr.style.fontWeight = 'bold';
+  tr.style.position = 'sticky';
+  tr.style.top = (rowHeight) + 'px';
+  tr.style.zIndex = '1';
+
+  headers.forEach((h, idx) => {
+    const td = document.createElement('td');
+    if (idx === 0) {
+      td.textContent = 'Összesítés';
+      td.style.color = '#ffcd56';
+    } else if (sums[idx]) {
+      const sumValue = sums[idx].sum.toLocaleString('hu-HU', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+      });
+      td.textContent = sumValue;
+      td.style.color = '#ffcd56';
+      td.style.textAlign = 'right';
+    } else {
+      td.textContent = '';
+    }
+    tr.appendChild(td);
+  });
+
+  return tr;
+}
+
+function calculateColumnSums(filtered) {
+  // Ez a függvény már nem használatos, de meghagyom kompatibilitás céljából
+  return null;
+}
+
+function openEditor(rowIndex, colIndex, type) {
+  currentEdit = { rowIndex, colIndex, type };
+  const old = document.getElementById("editorPopup");
+  if (old) old.remove();
+  
+  // Közvetlenül az adatok tömbből vegyük az értéket (list típusoknál nem működne a textContent)
+  const val = rows[rowIndex] && rows[rowIndex][colIndex] ? rows[rowIndex][colIndex] : "";
+  
+  const popup = document.createElement("div");
+  popup.id = "editorPopup";
+  popup.className = "popup";
+  popup.innerHTML = generateEditorContent(type, val);
+  document.body.appendChild(popup);
+  document.getElementById("editorSave").onclick = saveEdit;
+  document.getElementById("editorCancel").onclick = closeEdit;
+  
+  const area = document.getElementById("editorArea");
+  popup.style.display = "block";
+  
+  // Általános enter és esc kezelés az összes editor típushoz
+  if (area) {
+    area.focus();
+    // Ha select támogatott, jelöljük ki az eredeti értéket
+    if (typeof area.select === 'function') {
+      area.select();
+    }
+    // Enter → mentés
+    area.onkeydown = (e) => {
+      if (e.key === 'Enter') {
+        document.getElementById('editorSave').click();
+      }
+      // Esc → bezárás
+      else if (e.key === 'Escape') {
+        document.getElementById('editorCancel').click();
+      }
+    };
+  }
+  
+  // Number input speciális kezeléshez (ha van)
+  const numInput = document.getElementById("editorNum");
+  if (numInput) {
+    numInput.focus();
+    numInput.select();
+    // Az input value-ja szinkronizálódik az editorArea-val (csak olvasási céllal)
+    numInput.oninput = () => {
+      area.value = numInput.value;
+    };
+    numInput.onkeydown = (e) => {
+      if (e.key === 'Enter') {
+        document.getElementById('editorSave').click();
+      } else if (e.key === 'Escape') {
+        document.getElementById('editorCancel').click();
+      }
+    };
+  }
+  
+  // Date input kezeléshez (ha van)
+  const dateInput = document.getElementById("editorArea");
+  if (dateInput && dateInput.type === 'date') {
+    dateInput.focus();
+  }
+}
+
+function generateEditorContent(type, val) {
+  switch (type) {
+    case "string":
+      return `
+		<input type="text" id="editorArea" value="${val}" style="width:95%;"><br>
+        <button id="editorSave">Mentés</button>
+        <button id="editorCancel">Mégse</button>
+      `;
+	case "number":
+	  return `
+		<input type="number" id="editorNum" value="${val}" style="width:95%;">
+		<br>
+		<input type="text" id="editorArea" value="${val}" readonly>
+		<button id="editorSave">Mentés</button>
+		<button id="editorCancel">Mégse</button>
+	  `;
+	case "date":
+	  return `
+		<input type="date" id="editorArea" value="${val}" style="width:95%;">
+		<br>
+		<button id="editorSave">Mentés</button>
+		<button id="editorCancel">Mégse</button>
+	  `;
+	case "list":
+	  let arr = val;
+	  if (typeof arr === "string") {
+		try {
+		  arr = JSON.parse(arr);
+		} catch (e) {
+		  arr = [];
+		}
+	  }
+	  if (!Array.isArray(arr)) {
+		arr = [];
+	  }
+	  const listItems = arr.map((item, i) => `
+		<div class="list-item">
+		  <input type="text" value="${item.key}" 
+				 onchange="updateListItem(${i}, 'key', this.value)">
+		  <input type="text" value="${item.value}" 
+				 onchange="updateListItem(${i}, 'value', this.value)">
+		  <button onclick="removeListItem(${i})">❌</button>
+		</div>
+	  `).join("");
+	  return `
+		<div>
+		  <input type="text" id="listNewKey" placeholder="Kulcs..." style="width:40%;">
+		  <input type="text" id="listNewValue" placeholder="Érték..." style="width:40%;">
+		  <button onclick="addListItem()">Hozzáadás</button>
+		</div>
+		<div id="listContainer">
+		  ${listItems}
+		</div>
+		<textarea id="editorArea" readonly>${JSON.stringify(arr)}</textarea><br>
+		<button id="editorSave">Mentés</button>
+		<button id="editorCancel">Mégse</button>
+	  `;	  
+    case "boolean":
+	  const boolVal = (val && val.toString().trim().toLowerCase() === "true") ? "true" : "false";
+	  const cbState = (boolVal === "true") ? "checked" : "";
+	  return `
+	  	<label>
+	  	  <input type="checkbox" id="editorBool" ${cbState}
+			onchange="document.getElementById('editorArea').value = this.checked ? 'true' : 'false'">
+		 	Igen / Nem
+		</label>
+		<br>
+		<input type="text" id="editorArea" value="${boolVal}" readonly>
+		<button id="editorSave">Mentés</button>
+		<button id="editorCancel">Mégse</button>
+	  `;
+    default:
+      return `
+        <textarea id="editorArea">${val ?? ""}</textarea><br>
+        <button id="editorSave">Mentés</button>
+        <button id="editorCancel">Mégse</button>
+      `;
+  }
+}
+
+function addListItem() {
+  const key = document.getElementById("listNewKey").value.trim();
+  const value = document.getElementById("listNewValue").value.trim();
+  if (!key) return;
+  const container = document.getElementById("listContainer");
+  const div = document.createElement("div");
+  div.className = "list-item";
+  div.innerHTML = `
+    <input type="text" value="${key}" onchange="updateListItemDynamic(this, 'key')">
+    <input type="text" value="${value}" onchange="updateListItemDynamic(this, 'value')">
+    <button onclick="this.parentElement.remove(); updateListArea();">❌</button>
+  `;
+  container.appendChild(div);
+  document.getElementById("listNewKey").value = "";
+  document.getElementById("listNewValue").value = "";
+  updateListArea();
+}
+
+function updateListItem(index, field, newValue) {
+  const items = getListItems();
+  items[index][field] = newValue;
+  updateListArea(items);
+}
+
+function removeListItem(index) {
+  const items = document.querySelectorAll("#listContainer .list-item");
+  if (index >= 0 && index < items.length) {
+    items[index].remove();
+  }
+  updateListArea();
+}
+
+function updateListArea(items) {
+  if (!items) items = getListItems();
+  document.getElementById("editorArea").value = JSON.stringify(items);
+}
+
+function getListItems() {
+  return [...document.querySelectorAll("#listContainer .list-item")].map(div => {
+    const inputs = div.querySelectorAll("input");
+    return {
+      key: inputs[0].value,
+      value: inputs[1].value
+    };
+  });
+}
+
+function saveEdit() {
+  if (!currentEdit) return;
+  const area = document.getElementById("editorArea");
+  const newVal = area ? area.value.trim() : "";
+  rows[currentEdit.rowIndex][currentEdit.colIndex] = newVal;
+  closeEdit();
+  // Teljes táblázat újrarajzolása, hogy az összes mező típus (list, stb.) helyesen megjelenjen
+  drawVirtualTable();
+}
+
+function closeEdit() {
+  const tc = document.getElementById('editorArea')?.value || '';
+  navigator.clipboard.writeText(tc).then(() => {
+    console.log("Másolva a vágólapra:", tc);
+      }).catch(err => {
+        console.error("Másolás sikertelen:", err);
+   });
+  const popup = document.getElementById('editorPopup');
+  if (popup) popup.style.display = 'none';
+  currentEdit = null;
+}
+
+function askPrefixIfNeeded() {
+  if (defaultPrefix) return;
+  let prefix = prompt("Add meg az azonosító előtagját (pl. Cikk, TetelNaplo, ID):");
+  if (!prefix || prefix.trim() === "") {
+    prefix = "ID";
+  }
+  defaultPrefix = prefix.trim() + "-";
+}
+
+function getCurrentPrefix() {
+  if (rows.length === 0) return defaultPrefix;
+  const id = rows[0][0];
+  if (!id.includes("-")) return defaultPrefix;
+  return id.split("-")[0] + "-";
+}
+
+function generateNextId() {
+  const prefix = getCurrentPrefix();
+  const ids = rows
+    .map(r => r[0])
+    .filter(id => id.startsWith(prefix));
+  if (ids.length === 0) {
+    return prefix + "000001";
+  }
+  const numbers = ids.map(id => parseInt(id.split("-")[1], 10));
+  const next = Math.max(...numbers) + 1;
+  return prefix + String(next).padStart(6, "0");
+}
+
+function addRow() {
+  if (rows.length === 0) {
+    if (headers.length === 1) {
+      addColumnAuto();   // ✅ automatikus mező, prompt nélkül
+    }
+    askPrefixIfNeeded();
+  }
+  const newId = generateNextId();
+  const newRow = [newId, ...headers.slice(1).map(() => "")];
+  if (rows.length === 0) {
+    rows.push(newRow);
+  } else if (selectedRowIndex !== null) {
+    rows.splice(selectedRowIndex + 1, 0, newRow);
+  } else {
+    rows.push(newRow);
+  }
+  drawVirtualTable();
+}
+
+function deleteRow() {
+  if (selectedRowIndex === null) {
+    alert("Előbb jelölj ki egy sort törléshez!");
+    return;
+  }
+
+  if (!confirm("Biztosan törlöd a kijelölt sort?")) {
+    return;
+  }
+
+  // Sor törlése
+  rows.splice(selectedRowIndex, 1);
+
+  // Ha a törölt sor után már nincs több, lépjünk vissza eggyel
+  if (selectedRowIndex >= rows.length) {
+    selectedRowIndex = rows.length - 1;
+  }
+
+  // Ha már nincs sor, nullázzuk
+  if (rows.length === 0) {
+    selectedRowIndex = null;
+  }
+
+  drawVirtualTable();
+}
+
+function toSystemName(str) {
+  return str
+    .trim()
+    .normalize("NFD")                 // ékezetek szétbontása
+    .replace(/[\u0300-\u036f]/g, "")  // ékezetek törlése
+    .replace(/[^a-zA-Z0-9]+/g, "_")   // nem alfanumerikus → _
+    .replace(/^_+|_+$/g, "")          // felesleges _ törlése
+    .toLowerCase();
+}
+
+function addColumnAuto(name = "Mező1", type = "string") {
+  const insertIndex = headers.length;
+  headers.splice(insertIndex, 0, name);
+  rows.forEach(r => r.splice(insertIndex, 0, ""));
+  fieldDefinitions.extraInfo.push({
+    id: fieldDefinitions.extraInfo.length + 1,
+    name: toSystemName(name),
+    label: name,
+    type
+  });
+  buildFieldSelect();
+}
+
+function addColumn() {
+  const newName = prompt("Új mező neve:");
+  if (!newName || !newName.trim()) return;
+  const type = prompt(
+    "Mező típusa (string, number, memo, list, date, boolean):",
+    "string"
+  );
+  if (!type || !["string", "number", "memo", "list", "date", "boolean"].includes(type.trim())) {
+    alert("Érvénytelen típus, string lesz használva.");
+  }
+  const cleanName = newName.trim();
+  const cleanType = (type || "string").trim();
+  const insertIndex = (selectedColIndex !== null)
+    ? selectedColIndex + 1
+    : headers.length;
+  headers.splice(insertIndex, 0, cleanName);
+  rows.forEach(r => r.splice(insertIndex, 0, ""));
+  fieldDefinitions.extraInfo.splice(insertIndex - 1, 0, {
+    id: fieldDefinitions.extraInfo.length + 1,
+    name: toSystemName(cleanName),
+    label: cleanName,
+    type: cleanType
+  });
+  buildFieldSelect();
+  drawVirtualTable();
+}
+
+function deleteColumn() {
+  if (selectedColIndex === null) {
+    alert("Előbb jelölj ki egy oszlopot törléshez!");
+    return;
+  }
+  if (selectedColIndex === 0) {
+    alert("Az első oszlop (Azonosító) nem törölhető!");
+    return;
+  }
+  if (!confirm("Biztosan törlöd a kijelölt oszlopot?")) {
+    return;
+  }
+  headers.splice(selectedColIndex, 1);
+  rows.forEach(r => r.splice(selectedColIndex, 1));
+  fieldDefinitions.extraInfo.splice(selectedColIndex - 1, 1);
+  selectedColIndex = null;
+  buildFieldSelect();
+  drawVirtualTable();
+}
+
+function saveFilteredCSV(filtered) {
+  const delimiter = document.getElementById('delimiterInput').value || ",";
+  const csv = [
+    headers.slice(1).join(delimiter), // ✅ ID kihagyva
+      ...filtered.map(obj => obj.row.slice(1).join(delimiter)) // ✅ ID kihagyva
+  ].join("\n");
+  const blob = new Blob(["\uFEFF" + csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'table.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function tableToJson(sourceRows = rows) {
+  const defs = fieldDefinitions.extraInfo;
+  const newRegistry = {};
+  sourceRows.forEach(row => {
+    const id = row[0];
+    const values = [];
+    defs.forEach((fd, idx) => {
+      let raw = row[idx + 1];
+      if (fd.type === "number") {
+        raw = raw === "" ? null : Number(raw);
+      }
+      if (fd.type === "list") {
+        try {
+          raw = JSON.parse(raw || "[]");
+        } catch {
+          raw = [];
+        }
+      }
+      if (fd.type === "memo") {
+        raw = raw || "";
+      }
+      values.push({ id: fd.id, value: raw });
+    });
+    newRegistry[id] = { values };
+  });
+  return {
+    fieldDefinitions,
+    dataRegistry: newRegistry
+  };
+}
+
+function openApiResult(upc) {
+  const url = `https://api.upcitemdb.com/prod/trial/lookup?upc=${upc}`;
+  window.open(url, "_blank"); // új fülön/ablakon nyitja meg
+}
+
+async function searchBarcode(code) {
+  const url = `http://192.168.0.30/itdataset/upclookup.php?upc=${code}`;
+  const container = document.getElementById("eanTable");
+  container.innerHTML = ""; // előző tartalom törlése
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error("Proxy hiba: " + resp.status);
+    const data = await resp.json();
+    if (data.items && data.items.length > 0) {
+      const table = document.createElement("table");
+      table.className = "ean-table";
+      const headerRow = document.createElement("tr");
+      ["UPC", "Név", "Gyártó", "Kategória", "Kép"].forEach(h => {
+        const th = document.createElement("th");
+        th.textContent = h;
+        headerRow.appendChild(th);
+      });
+      table.appendChild(headerRow);
+      data.items.forEach(item => {
+        const tr = document.createElement("tr");
+        const tdUpc = document.createElement("td");
+        tdUpc.textContent = item.upc || code;
+        tr.appendChild(tdUpc);
+        const tdTitle = document.createElement("td");
+        tdTitle.textContent = item.title || "";
+        tr.appendChild(tdTitle);
+        const tdBrand = document.createElement("td");
+        tdBrand.textContent = item.brand || "";
+        tr.appendChild(tdBrand);
+        const tdCategory = document.createElement("td");
+        tdCategory.textContent = item.category || "";
+        tr.appendChild(tdCategory);
+        const tdImage = document.createElement("td");
+        if (item.images && item.images.length > 0) {
+          const img = document.createElement("img");
+          img.src = item.images[0];
+          img.alt = item.title || "Termékkép";
+          img.style.maxWidth = "80px";
+          tdImage.appendChild(img);
+        } else {
+          tdImage.textContent = "-";
+        }
+        tr.appendChild(tdImage);
+        table.appendChild(tr);
+      });
+      container.appendChild(table);
+    } else {
+      container.textContent = `Nincs találat erre a kódra: ${code}`;
+    }
+  } catch (err) {
+    console.error("Lekérdezés sikertelen:", err);
+    container.textContent = "Hiba történt a lekérdezésnél.";
+  }
+}
+
+function prepareBarCode() {
+  if (selectedRowIndex === null) {
+    alert("Nincs kijelölt sor.");
+    return;
+  }
+  const labelText = rows[selectedRowIndex][2];
+  const barcodeValue = rows[selectedRowIndex][1];
+  document.getElementById("printLabel").textContent = labelText;
+  JsBarcode("#printBarcode", barcodeValue, {
+    format: "CODE128",
+    lineColor: "#000",
+    width: 3,
+    height: 56,
+    displayValue: true
+  });
+}
+
+function dataPrint() {
+  const productName = rows[selectedRowIndex][2];
+  const barcodeValue = rows[selectedRowIndex][1];
+  prepareBarCode();
+  //window.print();
+  //return;
+  fetch('http://192.168.0.30/itdataset/brother_print.php', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      ProductName: productName,
+      BarcodeValue: barcodeValue
+    })
+  })
+  .then(res => res.text())
+  .then(text => console.log("Válasz:", text))
+  .catch(err => console.error("Hiba:", err));
+}
+
+document.getElementById('fieldSelect').addEventListener('change', drawVirtualTable);
+document.getElementById('filterValue').addEventListener('input', drawVirtualTable);
+document.getElementById('sortDesc').addEventListener('change', drawVirtualTable);
+document.getElementById('includeText').addEventListener('change', drawVirtualTable);
+document.querySelectorAll('input[name="combineMode"]').forEach(el => {
+  el.addEventListener('change', drawVirtualTable);
+});
+document.getElementById('fieldSelect2').addEventListener('change', drawVirtualTable);
+document.getElementById('filterValue2').addEventListener('input', drawVirtualTable);
+window.addEventListener("DOMContentLoaded", loadBaseCsv);
+window.addEventListener("DOMContentLoaded", () => {
+  createEmptyTable();
+  loadBaseCsv();
+});
+setTimeout(() => document.getElementById("editorArea")?.focus(), 0);
+
+</script>
